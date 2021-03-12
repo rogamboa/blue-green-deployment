@@ -1,8 +1,8 @@
 """Sample Flask Application"""
 import datetime
-import flask
 import platform
 import os
+import flask
 
 app = flask.Flask(__name__)
 

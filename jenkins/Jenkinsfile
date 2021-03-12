@@ -1,0 +1,83 @@
+pipeline {
+  agent any
+  stages {
+    stage('integration test') {
+      agent {
+        docker {
+          image 'python:3.7.3-stretch'
+        }
+      }
+      steps {
+        sh 'chmod +x -R $WORKSPACE/jenkins'
+        sh './jenkins/scripts/install-dependencies.sh'
+        sh './jenkins/scripts/lint.sh'
+      }
+    }
+    stage('build image and push to repo') {
+      steps {
+        withCredentials([[$class: 'AmazonWebServicesCredentialsBinding', accessKeyVariable: 'AWS_ACCESS_KEY_ID', credentialsId: 'AWS', secretKeyVariable: 'AWS_SECRET_ACCESS_KEY']]) {
+          sh 'echo \$(aws sts get-caller-identity | jq .Account | tr -d \\") > .env'
+          sh 'AWS_ID=\$(cat .env) && aws ecr get-login-password --region us-east-1 | docker login --username AWS --password-stdin \$AWS_ID.dkr.ecr.us-east-1.amazonaws.com'
+          sh 'docker build -t $REPO ./flask-app'
+          sh 'AWS_ID=\$(cat .env) && docker tag $REPO:latest \$AWS_ID.dkr.ecr.us-east-1.amazonaws.com/$REPO:build-$BRANCH_NAME'
+          sh 'AWS_ID=\$(cat .env) && docker push \$AWS_ID.dkr.ecr.us-east-1.amazonaws.com/$REPO:build-$BRANCH_NAME'
+        }
+
+      }
+    }
+    stage('run kubeconfig') {
+      steps {
+        withCredentials([[$class: 'AmazonWebServicesCredentialsBinding', accessKeyVariable: 'AWS_ACCESS_KEY_ID', credentialsId: 'AWS', secretKeyVariable: 'AWS_SECRET_ACCESS_KEY']]) {
+          sh 'aws eks --region us-east-1 update-kubeconfig --name $EKS_NAME'
+        }
+      }
+    }
+    stage('deploy blue container to eks cluster') {
+      when { branch 'blue'}
+      steps {
+        sh 'chmod +x -R $WORKSPACE/jenkins'
+        withCredentials([[$class: 'AmazonWebServicesCredentialsBinding', accessKeyVariable: 'AWS_ACCESS_KEY_ID', credentialsId: 'AWS', secretKeyVariable: 'AWS_SECRET_ACCESS_KEY']]) {
+          sh './jenkins/scripts/deploy-container.sh'
+        }
+      }
+    }
+    stage('update service to redirect traffic blue environment') {
+      when { branch 'blue'}
+      steps {
+        withCredentials([[$class: 'AmazonWebServicesCredentialsBinding', accessKeyVariable: 'AWS_ACCESS_KEY_ID', credentialsId: 'AWS', secretKeyVariable: 'AWS_SECRET_ACCESS_KEY']]) {
+          sh './jenkins/scripts/update-service.sh'
+        }
+      }
+    }
+    stage('deploy green container to eks cluster') {
+      when { branch 'green'}
+      steps {
+        sh 'chmod +x -R $WORKSPACE/jenkins'
+        withCredentials([[$class: 'AmazonWebServicesCredentialsBinding', accessKeyVariable: 'AWS_ACCESS_KEY_ID', credentialsId: 'AWS', secretKeyVariable: 'AWS_SECRET_ACCESS_KEY']]) {
+          sh './jenkins/scripts/deploy-container.sh'
+        }
+      }
+    }
+    stage('update service to redirect traffic green environment') {
+      when { branch 'green'}
+      steps {
+        withCredentials([[$class: 'AmazonWebServicesCredentialsBinding', accessKeyVariable: 'AWS_ACCESS_KEY_ID', credentialsId: 'AWS', secretKeyVariable: 'AWS_SECRET_ACCESS_KEY']]) {
+          sh './jenkins/scripts/update-service.sh'
+        }
+      }
+    }
+    stage('perform smoke test') {
+      when {
+        anyOf {
+          branch 'blue'
+          branch 'green'
+        }
+      }
+      steps {
+        withCredentials([[$class: 'AmazonWebServicesCredentialsBinding', accessKeyVariable: 'AWS_ACCESS_KEY_ID', credentialsId: 'AWS', secretKeyVariable: 'AWS_SECRET_ACCESS_KEY']]) {
+          sh './jenkins/scripts/smoke-test.sh'
+        }
+      }
+    }
+  }
+}
